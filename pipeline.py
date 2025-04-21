@@ -6,7 +6,7 @@ from tqdm import tqdm
 from monai.networks.nets import UNet
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
-from monai.data import CacheDataset, DataLoader, NibabelReader
+from monai.data import CacheDataset, DataLoader, NibabelReader,PersistentDataset
 from monai.transforms import (
     Compose, LoadImaged, ScaleIntensityRanged,
     ResizeWithPadOrCropd, RandCropByPosNegLabeld, ToTensord, EnsureChannelFirstd, RandCropByLabelClassesd, AsDiscreted
@@ -32,15 +32,15 @@ transforms = Compose([
     EnsureChannelFirstd(keys=["image", "seg"]),
     ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),
     ResizeWithPadOrCropd(keys=["image", "seg"], spatial_size=(512, 512, 32)),
-    AsDiscreted(keys=["seg"], to_onehot=6),
+    
     #RandCropByLabelClassesd(
     #keys=["image", "seg"],
     #label_key="seg",
     #spatial_size=(96, 96, 32),
     #num_classes=6,    # number of foreground classes (1, 2, 3,4,5)
     #ratios=[0, 1, 1, 1,1, 1],        # sample all classes equally
-   # num_samples=4,),
-    ToTensord(keys=["image", "seg"])
+   #num_samples=4,),
+   # ToTensord(keys=["image", "seg"])
 ])
 
 def get_data_files(img_dir, seg_dir):
@@ -62,8 +62,8 @@ class HemorrhageModel(L.LightningModule):
             strides=(2, 2, 2, 2),
             num_res_units=2,
         )
-        self.loss_fn = DiceCELoss(include_background=False,to_onehot_y=False, softmax=True, lambda_dice=0.7, lambda_ce=0.3)
-        self.dice_metric = DiceMetric(include_background=False, reduction="mean_batch",get_not_nans=True)
+        self.loss_fn = DiceCELoss(include_background=False,to_onehot_y=True, softmax=True, lambda_dice=0.7, lambda_ce=0.3)
+        self.dice_metric = DiceMetric(include_background=False, reduction="mean_batch",get_not_nans=True, ignore_empty=True)
         self.best_dice = 0.0
 
     def forward(self, x):
@@ -145,8 +145,18 @@ def main():
     train_files = get_data_files(f"{DATASET_DIR}/train/img", f"{DATASET_DIR}/train/seg")
     val_files = get_data_files(f"{DATASET_DIR}/val/img", f"{DATASET_DIR}/val/seg")
     
-    train_dataset = CacheDataset(train_files, transform=transforms)
-    val_dataset = CacheDataset(val_files, transform=transforms)
+    train_dataset = PersistentDataset(
+        train_files, 
+        transform=transforms,
+        cache_dir=os.path.join(SAVE_DIR, "cache_train")
+    )
+    
+    val_dataset = PersistentDataset(
+        val_files,
+        transform=transforms,
+        cache_dir=os.path.join(SAVE_DIR, "cache_val")
+    )
+
     
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=8)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)

@@ -16,9 +16,9 @@ from torch.optim import Adam
 
 
 
-DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
+DATASET_DIR = 'mbh_seg/nii'
 print(os.listdir(DATASET_DIR))
-SAVE_DIR = "/home/tibia/Documents/Projet_Hemorragi[e/test/first/"
+SAVE_DIR = "/test/first/"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 transforms = Compose([

@@ -6,7 +6,7 @@ from tqdm import tqdm
 from monai.networks.nets import UNet
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
-from monai.data import CacheDataset, DataLoader, NibabelReader,PersistentDataset
+from monai.data import CacheDataset, DataLoader, NibabelReader
 from monai.transforms import (
     Compose, LoadImaged, ScaleIntensityRanged,
     ResizeWithPadOrCropd, RandCropByPosNegLabeld, ToTensord, EnsureChannelFirstd, RandCropByLabelClassesd, AsDiscreted
@@ -16,12 +16,11 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 import warnings
 warnings.filterwarnings("ignore", message="no available indices of class.*to crop.*")
 
-
 # ======================
 # 1. CONFIGURATION
 # ======================
-DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/test/first/"
+DATASET_DIR = 'mbh/nii'
+SAVE_DIR = "test/first/"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ======================
@@ -32,15 +31,7 @@ transforms = Compose([
     EnsureChannelFirstd(keys=["image", "seg"]),
     ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),
     ResizeWithPadOrCropd(keys=["image", "seg"], spatial_size=(512, 512, 32)),
-    
-    #RandCropByLabelClassesd(
-    #keys=["image", "seg"],
-    #label_key="seg",
-    #spatial_size=(96, 96, 32),
-    #num_classes=6,    # number of foreground classes (1, 2, 3,4,5)
-    #ratios=[0, 1, 1, 1,1, 1],        # sample all classes equally
-   #num_samples=4,),
-   # ToTensord(keys=["image", "seg"])
+    ToTensord(keys=["image", "seg"], dtype=torch.float32),  # Convert to float32
 ])
 
 def get_data_files(img_dir, seg_dir):
@@ -49,7 +40,7 @@ def get_data_files(img_dir, seg_dir):
     return [{"image": img, "seg": lbl} for img, lbl in zip(images, labels)]
 
 # ======================
-# 3. LIGHTNING MODULE 
+# 3. LIGHTNING MODULE
 # ======================
 class HemorrhageModel(L.LightningModule):
     def __init__(self):
@@ -72,17 +63,16 @@ class HemorrhageModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]  # y is one-hot from AsDiscreted transform
         y_logits = self(x)
-        
+
         # Loss computation (automatically applies softmax)
         loss = self.loss_fn(y_logits, y)
-       
+
         # Metrics (must apply softmax first)
         y_prob = torch.softmax(y_logits, dim=1)
         self.dice_metric(y_prob, y)
-        
+
         self.log("train_loss", loss, prog_bar=True)
         return loss
-
 
     def validation_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
@@ -99,7 +89,6 @@ class HemorrhageModel(L.LightningModule):
         self.log("val_loss", loss, prog_bar=True)
         return loss
 
-       
     def on_train_epoch_end(self):
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
@@ -107,35 +96,32 @@ class HemorrhageModel(L.LightningModule):
 
     def on_validation_epoch_end(self):
         dice_scores,_  = self.dice_metric.aggregate()  # Shape: [num_classes]
-  
+
         self.dice_metric.reset()
-    
-    # Log individual class scores
+
+        # Log individual class scores
         class_names = ["EDH", "IPH", "IVH","SAH","SDH"]  # Adjust to your classes
-    
+
         for i, score in enumerate(dice_scores):
-        # Extract scalar value for each class
-         self.log(f"val_dice_{class_names[i]}", score.item())  # .item() converts to Python float
-    
-    # Log mean Dice (optional)
+            # Extract scalar value for each class
+            self.log(f"val_dice_{class_names[i]}", score.item())  # .item() converts to Python float
+
+        # Log mean Dice (optional)
         mean_dice = dice_scores.mean()
         self.log("val_dice_mean", mean_dice, prog_bar=True)
-    
+
         print(f"\nDice Scores:")
         for name, score in zip(class_names, dice_scores):
             print(f"{name}: {score.item():.4f}")
         print(f"Mean: {mean_dice.item():.4f}")
-    
-    # Save best model
+
+        # Save best model
         if mean_dice > self.best_dice:
             self.best_dice = mean_dice
             self.trainer.save_checkpoint(os.path.join(SAVE_DIR, "best.ckpt"))
-       
 
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=1e-3)
-
-  
 
 # ======================
 # 4. TRAINING SETUP
@@ -144,26 +130,26 @@ def main():
     # Load data (same as original)
     train_files = get_data_files(f"{DATASET_DIR}/train/img", f"{DATASET_DIR}/train/seg")
     val_files = get_data_files(f"{DATASET_DIR}/val/img", f"{DATASET_DIR}/val/seg")
-    
-    train_dataset = PersistentDataset(
-        train_files, 
+
+    train_dataset = CacheDataset(
+        train_files,
         transform=transforms,
-        cache_dir=os.path.join(SAVE_DIR, "cache_train")
-    )
-    
-    val_dataset = PersistentDataset(
-        val_files,
-        transform=transforms,
-        cache_dir=os.path.join(SAVE_DIR, "cache_val")
+        cache_rate=1.0,  # Cache tout le dataset
+        num_workers=8
     )
 
-    
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=8)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)
+    val_dataset = CacheDataset(
+        val_files,
+        transform=transforms,
+        cache_rate=1.0,  # Cache tout le dataset
+        num_workers=8
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0)
 
     # Initialize model with checkpoint if available
     model = HemorrhageModel()
-   
 
     # Configure trainer with progress bar and checkpointing
     trainer = L.Trainer(
@@ -177,15 +163,15 @@ def main():
             L.pytorch.callbacks.ModelCheckpoint(
             dirpath=SAVE_DIR,
             filename="best_{epoch}_{val_dice_mean:.4f}",  # Nom basé sur la métrique
-            monitor="val_dice_mean",  # Métrique à surveiller 
+            monitor="val_dice_mean",  # Métrique à surveiller
             mode="max",              # Maximiser le Dice
             save_top_k=3,            # Garder les 3 meilleurs modèles
             every_n_epochs=10,       # Sauvegarde périodique (optionnel)
-            save_last=True 
+            save_last=True
             )
         ]
     )
-    
+
     # Start training
     trainer.fit(model, train_loader, val_loader)
 

@@ -15,7 +15,7 @@ from torch.optim import Adam
 from pytorch_lightning.callbacks import ModelCheckpoint
 import warnings
 warnings.filterwarnings("ignore", message="no available indices of class.*to crop.*")
-
+warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
 
 # ======================
 # 1. CONFIGURATION
@@ -40,7 +40,7 @@ transforms = Compose([
     #num_classes=6,    # number of foreground classes (1, 2, 3,4,5)
     #ratios=[0, 1, 1, 1,1, 1],        # sample all classes equally
    #num_samples=4,),
-   # ToTensord(keys=["image", "seg"])
+    ToTensord(keys=["image", "seg"])
 ])
 
 def get_data_files(img_dir, seg_dir):
@@ -63,7 +63,7 @@ class HemorrhageModel(L.LightningModule):
             num_res_units=2,
         )
         self.loss_fn = DiceCELoss(include_background=False,to_onehot_y=True, softmax=True, lambda_dice=0.7, lambda_ce=0.3)
-        self.dice_metric = DiceMetric(include_background=False, reduction="mean_batch",get_not_nans=True, ignore_empty=True)
+        self.dice_metric = DiceMetric(include_background=False, reduction="mean_batch", ignore_empty=True)
         self.best_dice = 0.0
 
     def forward(self, x):
@@ -87,17 +87,30 @@ class HemorrhageModel(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
         y_logits = self(x)
+       
+        
 
-        # Loss
+     
+
+    # Loss
         loss = self.loss_fn(y_logits, y)
 
-        # Metrics
-        y_prob = torch.softmax(y_logits, dim=1)
-        self.dice_metric(y_prob, y)
+    # Dice computation
+        y_prob = torch.softmax(y_logits, dim=1) # (B, num_classes, H, W, D)
+       
+    # Convert y to one-hot if needed (assuming y is Bx1xHxWxD)
+        if y.shape[1] == 1:
+            y_onehot = torch.nn.functional.one_hot(y.long().squeeze(1), num_classes=6)
+            y_onehot = y_onehot.permute(0, 4, 1, 2, 3).float()
+        else:
+            y_onehot = y #(B, num_classes, H, W, D)
 
-        # Logs
+        self.dice_metric(y_prob, y_onehot)
+
+    # Logs
         self.log("val_loss", loss, prog_bar=True)
         return loss
+
 
        
     def on_train_epoch_end(self):
@@ -106,8 +119,9 @@ class HemorrhageModel(L.LightningModule):
             print(f"\nTrain Loss (epoch {self.current_epoch}): {train_loss.item():.4f}")
 
     def on_validation_epoch_end(self):
-        dice_scores,_  = self.dice_metric.aggregate()  # Shape: [num_classes]
-  
+        dice_scores = self.dice_metric.aggregate()  # Shape: [num_classes]
+
+        
         self.dice_metric.reset()
     
     # Log individual class scores
@@ -140,6 +154,8 @@ class HemorrhageModel(L.LightningModule):
 # ======================
 # 4. TRAINING SETUP
 # ======================
+
+
 def main():
     # Load data (same as original)
     train_files = get_data_files(f"{DATASET_DIR}/train/img", f"{DATASET_DIR}/train/seg")
@@ -168,7 +184,7 @@ def main():
     # Configure trainer with progress bar and checkpointing
     trainer = L.Trainer(
         log_every_n_steps=5,
-        max_epochs=1000,
+        max_epochs=10,
         accelerator="auto",
         devices=[0],
         default_root_dir=SAVE_DIR,
@@ -190,4 +206,5 @@ def main():
     trainer.fit(model, train_loader, val_loader)
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     main()
